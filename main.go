@@ -25,14 +25,6 @@ const (
 	PAGE_SIZE      = 4 * 1024 // bytes
 )
 
-const (
-	BYTE     = 1.0
-	KILOBYTE = 1024 * BYTE
-	MEGABYTE = 1024 * KILOBYTE
-	GIGABYTE = 1024 * MEGABYTE
-	TERABYTE = 1024 * GIGABYTE
-)
-
 var (
 	debug    bool
 	mount    string
@@ -42,6 +34,8 @@ var (
 
 	pageSize = int64(syscall.Getpagesize())
 	mode     = os.FileMode(0600)
+
+	units = []string{"B", "K", "M", "G", "T", "P", "E"}
 )
 
 func init() {
@@ -339,27 +333,13 @@ func (st *Stats) Handle(paths []string, depth uint) {
 }
 
 func ByteSize(bytes int64) string {
-	unit := ""
 	value := float64(bytes)
 
-	switch {
-	case bytes >= TERABYTE:
-		unit = "T"
-		value = value / TERABYTE
-	case bytes >= GIGABYTE:
-		unit = "G"
-		value = value / GIGABYTE
-	case bytes >= MEGABYTE:
-		unit = "M"
-		value = value / MEGABYTE
-	case bytes >= KILOBYTE:
-		unit = "K"
-		value = value / KILOBYTE
-	case bytes >= BYTE:
-		unit = "B"
-	case bytes == 0:
-		return "0"
+	var i int
+	for i = 0; value >= 1024 && i < len(units)-1; i++ {
+		value /= 1024
 	}
+	var unit = units[i]
 
 	stringValue := fmt.Sprintf("%.1f", value)
 	stringValue = strings.TrimSuffix(stringValue, ".0")
