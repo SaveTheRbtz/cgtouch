@@ -199,13 +199,13 @@ func (st *Stats) HandleFile(path string) error {
 			data[i] = binary.LittleEndian.Uint64(buf[i*SIZEOF_INT64 : (i+1)*SIZEOF_INT64])
 		}
 
+		cgroup := make([]byte, 8)
 		for _, d := range data {
 			pfn := d & PFN_MASK
 			if pfn == 0 {
 				continue
 			}
 
-			cgroup := make([]byte, 8)
 			n, err := st.kpagecgroup.ReadAt(cgroup, int64(pfn)*PAGEMAP_LENGTH)
 			if err != nil {
 				return err
@@ -238,8 +238,8 @@ func (st *Stats) HandleFile(path string) error {
 			}
 
 			// update total
-			st.Charged += 1
-			f.Charged += 1
+			st.Charged++
+			f.Charged++
 
 			if debug {
 				fmt.Printf("cgroup memory inode for pfn %x: %d\n", pfn, ci)
