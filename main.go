@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"log"
 	"os"
@@ -360,35 +361,47 @@ func printCgroupStats(cgroups Cgroups, charged uint64, pages int64) {
 		"not charged",
 	)
 
+	resolved, err := ResolveCgroups()
+	if err != nil {
+		fmt.Printf("cgroup resolution failed: %s\n", err)
+		return
+	}
+
 	for _, c := range cgroups {
-		p := float64(c.Charged) * 100 / float64(pages)
-		path, err := ResolvCgroup(c.Inode)
-		pt := path.Path
-		if err != nil {
-			pt = err.Error()
+		var pt string
+		if cg, ok := resolved[c.Inode]; !ok {
+			pt = fmt.Sprintf("cgroup not resolved: %d", c.Inode)
+		} else {
+			pt = cg.Path
 		}
+
+		p := float64(c.Charged) * 100 / float64(pages)
 		fmt.Printf("%12d%10.1f%%%12d        %s\n", c.Inode, p, c.Charged, pt)
 	}
 }
 
-// TODO (brk0v): add cache for cgroups
-func ResolvCgroup(inode uint64) (*Cgroup, error) {
-	cg := &Cgroup{}
-	err := filepath.Walk(mount, func(path string, f os.FileInfo, err error) error {
-		if f.IsDir() {
-			var stat syscall.Stat_t
-			if err := syscall.Stat(path, &stat); err != nil {
-				return err
-			}
-			if stat.Ino == inode {
-				cg.Path = path
-				cg.Inode = stat.Ino
-				return nil
-			}
+func ResolveCgroups() (map[uint64]Cgroup, error) {
+	cgroups := make(map[uint64]Cgroup)
+	err := fs.WalkDir(os.DirFS(mount), ".", func(path string, d fs.DirEntry, _ error) error {
+		if !d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return nil
+		}
+		cgroups[stat.Ino] = Cgroup{
+			Path:  filepath.Join(mount, path),
+			Inode: stat.Ino,
 		}
 		return nil
 	})
-	return cg, err
+	return cgroups, err
 }
 
 func main() {
