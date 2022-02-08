@@ -149,16 +149,16 @@ func (st *Stats) HandleFile(path string) error {
 
 		data := make([]uint64, len(buf)/SIZEOF_INT64)
 		for i := range data {
-			data[i] = binary.LittleEndian.Uint64(buf[i*SIZEOF_INT64 : (i+1)*SIZEOF_INT64])
+			data[i] = binary.LittleEndian.Uint64(buf[i*SIZEOF_INT64:])
 		}
 
+		cgroup := make([]byte, 8)
 		for _, d := range data {
 			pfn := d & PFN_MASK
 			if pfn == 0 {
 				continue
 			}
 
-			cgroup := make([]byte, 8)
 			n, err := st.kpagecgroup.ReadAt(cgroup, int64(pfn)*PAGEMAP_LENGTH)
 			if err != nil {
 				return err
@@ -191,8 +191,8 @@ func (st *Stats) HandleFile(path string) error {
 			}
 
 			// update total
-			st.Charged += 1
-			f.Charged += 1
+			st.Charged++
+			f.Charged++
 
 			if debug {
 				fmt.Printf("cgroup memory inode for pfn %x: %d\n", pfn, ci)
@@ -252,7 +252,7 @@ func (st *Stats) handleBatch(f *os.File, off, size int64) (buf []byte, batch int
 	}
 
 	for i, v := range mincoreVec {
-		if v%2 == 1 {
+		if v&1 == 1 {
 			// load pages to PTE
 			_ = *(*int)(unsafe.Pointer(mmPtr + uintptr(pageSize*int64(i))))
 		}
