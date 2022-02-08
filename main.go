@@ -414,7 +414,6 @@ func main() {
 	stat, err := NewStats()
 	if err != nil {
 		log.Fatalln(err)
-		os.Exit(1)
 	}
 
 	stat.Handle(flag.Args(), 0)
