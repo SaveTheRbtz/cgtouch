@@ -185,13 +185,9 @@ func (st *Stats) HandleFile(path string) error {
 		index := int64(mmPtr) / pageSize * PAGEMAP_LENGTH
 		buf := make([]byte, np*PAGEMAP_LENGTH)
 
-		n, err := st.pagemap.ReadAt(buf, index)
+		_, err = st.pagemap.ReadAt(buf, index)
 		if err != nil {
 			return err
-		}
-
-		if int64(n)/PAGEMAP_LENGTH != np {
-			return fmt.Errorf("read data from pagemap is invalid")
 		}
 
 		data := make([]uint64, len(buf)/SIZEOF_INT64)
@@ -206,13 +202,9 @@ func (st *Stats) HandleFile(path string) error {
 			}
 
 			cgroup := make([]byte, 8)
-			n, err := st.kpagecgroup.ReadAt(cgroup, int64(pfn)*PAGEMAP_LENGTH)
+			_, err = st.kpagecgroup.ReadAt(cgroup, int64(pfn)*PAGEMAP_LENGTH)
 			if err != nil {
 				return err
-			}
-
-			if int64(n/8) != 1 {
-				return fmt.Errorf("read data from /proc/kpagecgroup is invalid")
 			}
 
 			ci := binary.LittleEndian.Uint64(cgroup)
