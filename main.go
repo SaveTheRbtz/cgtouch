@@ -18,6 +18,7 @@ import (
 
 	flag "github.com/spf13/pflag"
 	"go.uber.org/atomic"
+	"go.uber.org/multierr"
 )
 
 const (
@@ -131,10 +132,10 @@ func NewStats() (*Stats, error) {
 	return stats, nil
 }
 
-func (st *Stats) Close() error {
-	_ = st.kpagecgroup.Close()
-	_ = st.pagemap.Close()
-	return nil
+func (st *Stats) Close() (err error) {
+	err = multierr.Append(err, st.kpagecgroup.Close())
+	err = multierr.Append(err, st.pagemap.Close())
+	return err
 }
 
 func (st *Stats) HandleFile(path string) error {
@@ -249,10 +250,7 @@ func (st *Stats) handleBatch(f *os.File, off, size int64) (buf []byte, batch int
 	}
 
 	defer func() {
-		sErr := syscall.Munmap(mm)
-		if sErr != nil {
-			err = sErr
-		}
+		err = multierr.Append(err, syscall.Munmap(mm))
 	}()
 
 	// disable readahead
@@ -263,10 +261,7 @@ func (st *Stats) handleBatch(f *os.File, off, size int64) (buf []byte, batch int
 
 	defer func() {
 		// reset referenced flags
-		sErr := syscall.Madvise(mm, syscall.MADV_SEQUENTIAL)
-		if sErr != nil {
-			err = sErr
-		}
+		err = multierr.Append(err, syscall.Madvise(mm, syscall.MADV_SEQUENTIAL))
 	}()
 
 	// mincore for finding out pages in page cache
