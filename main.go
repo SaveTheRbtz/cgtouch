@@ -154,13 +154,9 @@ func (st *Stats) HandleFile(path string) error {
 				continue
 			}
 
-			n, err := st.kpagecgroup.ReadAt(cgroup, int64(pfn)*PAGEMAP_LENGTH)
+			_, err := st.kpagecgroup.ReadAt(cgroup, int64(pfn)*PAGEMAP_LENGTH)
 			if err != nil {
 				return err
-			}
-
-			if int64(n/8) != 1 {
-				return fmt.Errorf("read data from /proc/kpagecgroup is invalid")
 			}
 
 			ci := binary.LittleEndian.Uint64(cgroup)
