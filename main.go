@@ -10,14 +10,18 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
 	flag "github.com/spf13/pflag"
+	"go.uber.org/atomic"
 )
 
 const (
+	FILES_BATCH    = 1 << 10
 	PAGEMAP_BATCH  = 64 << 10
 	PAGEMAP_LENGTH = int64(8)
 	SIZEOF_INT64   = 8 // bytes
@@ -65,19 +69,21 @@ type File struct {
 type Files map[string]*File
 
 type Stats struct {
-	Charged uint64
-	Size    int64
-	Pages   int64
+	Charged     atomic.Uint64
+	Size        atomic.Int64
+	Pages       atomic.Int64
+	watchedDirs atomic.Int64
 
+	m       *sync.Mutex
 	Cgroups Cgroups
 	Files   Files
-
-	watchedDirs int
 
 	pagemap     *os.File
 	kpagecgroup *os.File
 
-	errs []error
+	WG    *sync.WaitGroup
+	errs  chan error
+	paths chan string
 }
 
 func NewStats() (*Stats, error) {
@@ -91,13 +97,44 @@ func NewStats() (*Stats, error) {
 		return nil, err
 	}
 
-	return &Stats{
+	wg := &sync.WaitGroup{}
+
+	stats := &Stats{
+		m:           &sync.Mutex{},
 		pagemap:     pagemap,
 		kpagecgroup: kpagecgroup,
-		errs:        make([]error, 0),
+		errs:        make(chan error, FILES_BATCH),
+		paths:       make(chan string, FILES_BATCH),
 		Cgroups:     make(Cgroups),
 		Files:       make(Files),
-	}, nil
+		WG:          wg,
+	}
+
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+		go func() {
+			for fn := range stats.paths {
+				err := stats.HandleFile(fn)
+				if err != nil {
+					stats.errs <- err
+				}
+			}
+			wg.Done()
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(stats.errs)
+	}()
+
+	return stats, nil
+}
+
+func (st *Stats) Close() error {
+	_ = st.kpagecgroup.Close()
+	_ = st.pagemap.Close()
+	return nil
 }
 
 func (st *Stats) HandleFile(path string) error {
@@ -129,10 +166,12 @@ func (st *Stats) HandleFile(path string) error {
 		Size:    size,
 		Path:    path,
 	}
+	st.m.Lock()
 	st.Files[path] = f
+	st.m.Unlock()
 
-	st.Pages += pages
-	st.Size += size
+	st.Pages.Add(pages)
+	st.Size.Add(size)
 
 	var batch int64
 	var buf []byte
@@ -172,6 +211,7 @@ func (st *Stats) HandleFile(path string) error {
 			}
 
 			// update for all cgroup
+			st.m.Lock()
 			if _, ok := st.Cgroups[ci]; ok {
 				st.Cgroups[ci].Charged += 1
 			} else {
@@ -180,9 +220,10 @@ func (st *Stats) HandleFile(path string) error {
 					Inode:   ci,
 				}
 			}
+			st.m.Unlock()
 
 			// update total
-			st.Charged++
+			st.Charged.Inc()
 			f.Charged++
 
 			if debug {
@@ -257,16 +298,16 @@ func (st *Stats) handleBatch(f *os.File, off, size int64) (buf []byte, batch int
 	return buf, batch, nil
 }
 
-func (st *Stats) Handle(paths []string, depth uint) {
+func (st *Stats) Handle(paths []string, depth uint) chan error {
 	for _, path := range paths {
 		if debug {
-			fmt.Println("Working with file: ", path)
+			fmt.Println("Working with path: ", path)
 		}
 
 		// get stat
 		stat, err := os.Lstat(path)
 		if err != nil {
-			st.errs = append(st.errs, err)
+			st.errs <- err
 			continue
 		}
 
@@ -275,16 +316,16 @@ func (st *Stats) Handle(paths []string, depth uint) {
 			if follow {
 				path, err = filepath.EvalSymlinks(path)
 				if err != nil {
-					st.errs = append(st.errs, err)
+					st.errs <- err
 					continue
 				}
 				stat, err = os.Lstat(path)
 				if err != nil {
-					st.errs = append(st.errs, err)
+					st.errs <- err
 					continue
 				}
 			} else {
-				st.errs = append(st.errs, fmt.Errorf("Don't follow symlinks for %s. If you want then use \"-f\" flag", path))
+				st.errs <- fmt.Errorf("Don't follow symlinks for %s. If you want then use \"-f\" flag", path)
 				continue
 			}
 		}
@@ -292,17 +333,17 @@ func (st *Stats) Handle(paths []string, depth uint) {
 		// check of file type
 		if stat.IsDir() {
 			// it is directory
-			st.watchedDirs += 1
+			st.watchedDirs.Inc()
 
 			if depth+1 > maxDepth {
-				st.errs = append(st.errs, fmt.Errorf("max depth reached for %s", path))
+				st.errs <- fmt.Errorf("max depth reached for %s", path)
 				continue
 			}
 
 			// get file list
 			files, err := ioutil.ReadDir(path)
 			if err != nil {
-				st.errs = append(st.errs, err)
+				st.errs <- err
 				continue
 			}
 
@@ -311,21 +352,20 @@ func (st *Stats) Handle(paths []string, depth uint) {
 			for _, file := range files {
 				fs = append(fs, filepath.Join(path, file.Name()))
 			}
-
 			st.Handle(fs, depth+1)
-
 		} else if stat.Mode().IsRegular() {
 			// it's regular file
-			err := st.HandleFile(path)
-			if err != nil {
-				st.errs = append(st.errs, err)
-			}
+			st.paths <- path
 		} else {
 			// it's something else: device, pipe, socket
-			st.errs = append(st.errs, fmt.Errorf("%s is not a regular file", path))
+			st.errs <- fmt.Errorf("%s is not a regular file", path)
 		}
-
 	}
+
+	if depth == 0 {
+		close(st.paths)
+	}
+	return st.errs
 }
 
 func ByteSize(bytes int64) string {
@@ -401,15 +441,11 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+	defer stat.Close()
 
-	stat.Handle(flag.Args(), 0)
-
-	// out errors
-	for _, err := range stat.errs {
+	errs := stat.Handle(flag.Args(), 0)
+	for err := range errs {
 		fmt.Println("Warning: ", err)
-	}
-	if len(stat.errs) > 0 {
-		fmt.Println("")
 	}
 
 	// print per file stats
@@ -422,25 +458,25 @@ func main() {
 	}
 
 	// calculate total
-	sc := stat.Charged * PAGE_SIZE
-	if int64(sc) > stat.Size {
-		sc = uint64(stat.Size)
+	sc := stat.Charged.Load() * PAGE_SIZE
+	if int64(sc) > stat.Size.Load() {
+		sc = uint64(stat.Size.Load())
 	}
-	percent := float64(sc*100) / float64(stat.Size)
+	percent := float64(sc*100) / float64(stat.Size.Load())
 
 	// print total
 	fmt.Printf("%14s: %d\n", "Files", len(stat.Files))
-	fmt.Printf("%14s: %d\n", "Directories", stat.watchedDirs)
+	fmt.Printf("%14s: %d\n", "Directories", stat.watchedDirs.Load())
 	fmt.Printf("%14s: %d/%d %s/%s %.1f%%\n\n",
 		"Resident Pages",
-		stat.Charged,
-		stat.Pages,
+		stat.Charged.Load(),
+		stat.Pages.Load(),
 		ByteSize(int64(sc)),
-		ByteSize(stat.Size),
+		ByteSize(stat.Size.Load()),
 		percent,
 	)
 
 	// print per cgroup total
-	printCgroupStats(stat.Cgroups, stat.Charged, stat.Pages)
+	printCgroupStats(stat.Cgroups, stat.Charged.Load(), stat.Pages.Load())
 
 }
